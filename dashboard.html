@@ -1,0 +1,1441 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>BlindGuard – Motorcycle Safety Dashboard</title>
+  <meta name="description" content="Real-time blind spot monitoring dashboard for motorcycle safety system with camera feeds, collision alerts, LED status and sensor data." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Share+Tech+Mono&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg-primary: #070b14;
+      --bg-secondary: #0d1526;
+      --bg-card: #111c35;
+      --bg-card-hover: #162040;
+      --border: rgba(56, 130, 255, 0.18);
+      --border-glow: rgba(56, 130, 255, 0.45);
+      --accent-blue: #3882ff;
+      --accent-cyan: #00d4ff;
+      --accent-green: #00ff9d;
+      --accent-red: #ff3b5c;
+      --accent-yellow: #ffcc00;
+      --accent-orange: #ff7a00;
+      --text-primary: #e8f0ff;
+      --text-secondary: #7a91c4;
+      --text-muted: #3d5075;
+      --font-mono: 'Share Tech Mono', monospace;
+      --font-ui: 'Inter', sans-serif;
+      --alert-glow: 0 0 40px rgba(255, 59, 92, 0.6);
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: var(--bg-primary);
+      font-family: var(--font-ui);
+      color: var(--text-primary);
+      min-height: 100vh;
+      overflow-x: hidden;
+    }
+
+    /* ── Starfield BG ── */
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background:
+        radial-gradient(ellipse 80% 60% at 20% 10%, rgba(56,130,255,0.07) 0%, transparent 70%),
+        radial-gradient(ellipse 60% 40% at 80% 90%, rgba(0,212,255,0.05) 0%, transparent 70%);
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    /* ── Header ── */
+    header {
+      position: relative;
+      z-index: 10;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 16px 32px;
+      background: rgba(13,21,38,0.85);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border);
+    }
+
+    .logo {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .logo-icon {
+      width: 40px;
+      height: 40px;
+      background: linear-gradient(135deg, var(--accent-blue), var(--accent-cyan));
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 20px;
+      box-shadow: 0 0 20px rgba(56,130,255,0.4);
+    }
+
+    .logo-text h1 {
+      font-size: 18px;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+      background: linear-gradient(90deg, #fff, var(--accent-cyan));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .logo-text p {
+      font-size: 11px;
+      color: var(--text-secondary);
+      font-family: var(--font-mono);
+      letter-spacing: 0.12em;
+    }
+
+    .header-right {
+      display: flex;
+      align-items: center;
+      gap: 20px;
+    }
+
+    .status-pill {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      background: rgba(0,255,157,0.08);
+      border: 1px solid rgba(0,255,157,0.25);
+      border-radius: 20px;
+      padding: 6px 14px;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--accent-green);
+      letter-spacing: 0.08em;
+    }
+
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--accent-green);
+      animation: pulse-green 2s ease-in-out infinite;
+    }
+
+    @keyframes pulse-green {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(0,255,157,0.6); }
+      50% { box-shadow: 0 0 0 6px rgba(0,255,157,0); }
+    }
+
+    .clock {
+      font-family: var(--font-mono);
+      font-size: 14px;
+      color: var(--text-secondary);
+    }
+
+    /* ── Main Layout ── */
+    main {
+      position: relative;
+      z-index: 5;
+      padding: 24px 32px;
+      max-width: 1600px;
+      margin: 0 auto;
+    }
+
+    /* ── Collision Alert Banner ── */
+    #collision-alert {
+      display: none;
+      align-items: center;
+      gap: 16px;
+      background: linear-gradient(90deg, rgba(255,59,92,0.18), rgba(255,122,0,0.12));
+      border: 1px solid var(--accent-red);
+      border-radius: 12px;
+      padding: 14px 24px;
+      margin-bottom: 24px;
+      animation: alertFlash 0.4s ease-in-out infinite alternate;
+      box-shadow: var(--alert-glow);
+    }
+
+    #collision-alert.active { display: flex; }
+
+    @keyframes alertFlash {
+      from { border-color: rgba(255,59,92,0.6); box-shadow: 0 0 30px rgba(255,59,92,0.3); }
+      to   { border-color: rgba(255,59,92,1);   box-shadow: 0 0 60px rgba(255,59,92,0.8); }
+    }
+
+    .alert-icon {
+      font-size: 28px;
+      animation: shake 0.3s ease-in-out infinite alternate;
+    }
+
+    @keyframes shake {
+      from { transform: translateX(-3px) rotate(-5deg); }
+      to   { transform: translateX(3px) rotate(5deg); }
+    }
+
+    .alert-content h2 {
+      font-size: 16px;
+      font-weight: 700;
+      color: var(--accent-red);
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+    }
+
+    .alert-content p {
+      font-size: 12px;
+      color: rgba(255,255,255,0.7);
+      font-family: var(--font-mono);
+    }
+
+    .alert-side {
+      margin-left: auto;
+      font-family: var(--font-mono);
+      font-size: 13px;
+      color: var(--accent-red);
+      font-weight: 600;
+      letter-spacing: 0.08em;
+    }
+
+    /* ── Grid Layouts ── */
+    .cameras-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 20px;
+      margin-bottom: 24px;
+    }
+
+    .bottom-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 20px;
+    }
+
+    /* ── Card Base ── */
+    .card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      overflow: hidden;
+      transition: border-color 0.3s, box-shadow 0.3s;
+    }
+
+    .card:hover {
+      border-color: var(--border-glow);
+      box-shadow: 0 0 24px rgba(56,130,255,0.1);
+    }
+
+    .card-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 14px 18px;
+      border-bottom: 1px solid var(--border);
+      background: rgba(255,255,255,0.02);
+    }
+
+    .card-title {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--text-secondary);
+    }
+
+    .card-title .dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--accent-blue);
+    }
+
+    .card-badge {
+      font-family: var(--font-mono);
+      font-size: 10px;
+      padding: 3px 8px;
+      border-radius: 20px;
+      background: rgba(56,130,255,0.12);
+      border: 1px solid rgba(56,130,255,0.3);
+      color: var(--accent-blue);
+    }
+
+    /* ── Camera Feed ── */
+    .camera-card {}
+
+    .camera-viewport {
+      position: relative;
+      width: 100%;
+      aspect-ratio: 4/3;
+      background: #050b18;
+      overflow: hidden;
+    }
+
+    .camera-feed-canvas {
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+
+    /* Corner brackets */
+    .camera-viewport::before,
+    .camera-viewport::after {
+      content: '';
+      position: absolute;
+      width: 18px;
+      height: 18px;
+      z-index: 3;
+    }
+
+    .camera-viewport::before {
+      top: 8px; left: 8px;
+      border-top: 2px solid var(--accent-cyan);
+      border-left: 2px solid var(--accent-cyan);
+    }
+
+    .camera-viewport::after {
+      bottom: 8px; right: 8px;
+      border-bottom: 2px solid var(--accent-cyan);
+      border-right: 2px solid var(--accent-cyan);
+    }
+
+    .cam-overlay {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      z-index: 2;
+    }
+
+    /* Scanline effect */
+    .cam-overlay::after {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background: repeating-linear-gradient(
+        0deg,
+        transparent,
+        transparent 3px,
+        rgba(0,0,0,0.08) 3px,
+        rgba(0,0,0,0.08) 4px
+      );
+    }
+
+    .cam-label {
+      position: absolute;
+      bottom: 10px;
+      left: 10px;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: rgba(0,212,255,0.8);
+      background: rgba(0,0,0,0.5);
+      padding: 2px 8px;
+      border-radius: 4px;
+      border: 1px solid rgba(0,212,255,0.2);
+      z-index: 4;
+    }
+
+    .cam-rec {
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      font-family: var(--font-mono);
+      font-size: 10px;
+      color: var(--accent-red);
+      z-index: 4;
+    }
+
+    .cam-rec-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--accent-red);
+      animation: blink 1.2s step-end infinite;
+    }
+
+    @keyframes blink {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0; }
+    }
+
+    /* Detection box overlay */
+    .detection-box {
+      position: absolute;
+      border: 2px solid var(--accent-red);
+      border-radius: 4px;
+      z-index: 5;
+      display: none;
+      pointer-events: none;
+    }
+
+    .detection-box.active { display: block; animation: detBox 0.5s ease infinite alternate; }
+
+    @keyframes detBox {
+      from { border-color: rgba(255,59,92,0.7); box-shadow: 0 0 8px rgba(255,59,92,0.3); }
+      to   { border-color: rgba(255,59,92,1);   box-shadow: 0 0 16px rgba(255,59,92,0.8); }
+    }
+
+    .detection-label {
+      position: absolute;
+      top: -20px;
+      left: 0;
+      background: var(--accent-red);
+      color: #fff;
+      font-size: 9px;
+      font-family: var(--font-mono);
+      padding: 2px 5px;
+      white-space: nowrap;
+    }
+
+    .camera-stats {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 0;
+    }
+
+    .cam-stat {
+      text-align: center;
+      padding: 10px 8px;
+      border-right: 1px solid var(--border);
+    }
+
+    .cam-stat:last-child { border-right: none; }
+
+    .cam-stat-val {
+      font-family: var(--font-mono);
+      font-size: 16px;
+      font-weight: 700;
+      color: var(--accent-cyan);
+    }
+
+    .cam-stat-lbl {
+      font-size: 9px;
+      color: var(--text-muted);
+      letter-spacing: 0.08em;
+      margin-top: 2px;
+    }
+
+    /* Camera ALERT state */
+    .camera-card.alert-cam .camera-viewport {
+      box-shadow: inset 0 0 30px rgba(255,59,92,0.3);
+    }
+
+    .camera-card.alert-cam .card-header {
+      background: rgba(255,59,92,0.08);
+      border-color: rgba(255,59,92,0.3);
+    }
+
+    /* ── LED Panel ── */
+    .led-panel {
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    .led-item {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      padding: 12px 16px;
+      background: rgba(255,255,255,0.02);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      transition: all 0.3s;
+    }
+
+    .led-item.active {
+      background: rgba(0,255,157,0.06);
+      border-color: rgba(0,255,157,0.3);
+      box-shadow: 0 0 16px rgba(0,255,157,0.1);
+    }
+
+    .led-item.alert-led {
+      background: rgba(255,59,92,0.08);
+      border-color: rgba(255,59,92,0.4);
+      box-shadow: 0 0 20px rgba(255,59,92,0.15);
+    }
+
+    .led-bulb {
+      width: 22px;
+      height: 22px;
+      border-radius: 50%;
+      background: #1a1a2e;
+      border: 2px solid rgba(255,255,255,0.1);
+      flex-shrink: 0;
+      transition: all 0.4s;
+      position: relative;
+    }
+
+    .led-item.active .led-bulb {
+      background: radial-gradient(circle at 35% 35%, #7fff70, #00cc55);
+      border-color: rgba(0,255,157,0.5);
+      box-shadow: 0 0 12px rgba(0,255,157,0.8), 0 0 24px rgba(0,255,157,0.4);
+    }
+
+    .led-item.alert-led .led-bulb {
+      background: radial-gradient(circle at 35% 35%, #ff9999, #ff2255);
+      border-color: rgba(255,59,92,0.5);
+      box-shadow: 0 0 12px rgba(255,59,92,0.9), 0 0 24px rgba(255,59,92,0.5);
+      animation: ledPulse 0.5s ease-in-out infinite alternate;
+    }
+
+    @keyframes ledPulse {
+      from { box-shadow: 0 0 8px rgba(255,59,92,0.7), 0 0 16px rgba(255,59,92,0.3); }
+      to   { box-shadow: 0 0 16px rgba(255,59,92,1), 0 0 32px rgba(255,59,92,0.7); }
+    }
+
+    .led-info { flex: 1; }
+
+    .led-name {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+
+    .led-desc {
+      font-size: 10px;
+      color: var(--text-muted);
+      font-family: var(--font-mono);
+      margin-top: 2px;
+    }
+
+    .led-status {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      font-weight: 700;
+      padding: 3px 10px;
+      border-radius: 12px;
+      background: rgba(255,255,255,0.06);
+      color: var(--text-muted);
+      letter-spacing: 0.08em;
+      transition: all 0.3s;
+    }
+
+    .led-item.active .led-status {
+      background: rgba(0,255,157,0.15);
+      color: var(--accent-green);
+    }
+
+    .led-item.alert-led .led-status {
+      background: rgba(255,59,92,0.2);
+      color: var(--accent-red);
+    }
+
+    /* ── Radar / Sensor Card ── */
+    .sensor-body {
+      padding: 16px 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    .radar-ring {
+      position: relative;
+      width: 140px;
+      height: 140px;
+      margin: 0 auto 8px;
+    }
+
+    .radar-canvas { display: block; }
+
+    .radar-center-val {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      pointer-events: none;
+    }
+
+    .radar-center-val .big { font-size: 26px; font-weight: 700; font-family: var(--font-mono); color: var(--accent-cyan); }
+    .radar-center-val .unit { font-size: 10px; color: var(--text-muted); }
+
+    .sensor-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 0;
+      border-bottom: 1px solid rgba(255,255,255,0.04);
+    }
+
+    .sensor-row:last-child { border-bottom: none; }
+
+    .sensor-row-label {
+      font-size: 11px;
+      color: var(--text-secondary);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .sensor-row-label .icon { font-size: 14px; }
+
+    .sensor-row-val {
+      font-family: var(--font-mono);
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+
+    .sensor-row-val.warn { color: var(--accent-yellow); }
+    .sensor-row-val.danger { color: var(--accent-red); }
+
+    /* Lean angle indicator */
+    .lean-indicator {
+      position: relative;
+      height: 60px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: rgba(0,0,0,0.2);
+      border-radius: 10px;
+      overflow: hidden;
+    }
+
+    .lean-track {
+      position: absolute;
+      width: 90%;
+      height: 4px;
+      background: rgba(255,255,255,0.07);
+      border-radius: 2px;
+    }
+
+    .lean-fill-left, .lean-fill-right {
+      position: absolute;
+      height: 4px;
+      top: calc(50% - 2px);
+      border-radius: 2px;
+      transition: width 0.4s ease;
+    }
+
+    .lean-fill-left  { right: 50%; background: linear-gradient(to left,  var(--accent-blue), var(--accent-cyan)); }
+    .lean-fill-right { left:  50%; background: linear-gradient(to right, var(--accent-blue), var(--accent-cyan)); }
+
+    .lean-needle {
+      position: absolute;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: #fff;
+      box-shadow: 0 0 10px rgba(56,130,255,0.8);
+      transition: left 0.4s ease;
+      top: calc(50% - 7px);
+    }
+
+    .lean-labels {
+      position: absolute;
+      width: 90%;
+      display: flex;
+      justify-content: space-between;
+      top: 8px;
+    }
+
+    .lean-labels span { font-family: var(--font-mono); font-size: 9px; color: var(--text-muted); }
+
+    .lean-val-display {
+      position: absolute;
+      bottom: 6px;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--accent-blue);
+    }
+
+    /* ── History Log ── */
+    .log-body {
+      padding: 0;
+      max-height: 200px;
+      overflow-y: auto;
+    }
+
+    .log-body::-webkit-scrollbar { width: 4px; }
+    .log-body::-webkit-scrollbar-track { background: transparent; }
+    .log-body::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+    .log-entry {
+      display: flex;
+      align-items: flex-start;
+      gap: 12px;
+      padding: 10px 18px;
+      border-bottom: 1px solid rgba(255,255,255,0.03);
+      font-family: var(--font-mono);
+      font-size: 11px;
+      animation: logFade 0.4s ease;
+    }
+
+    @keyframes logFade { from { opacity: 0; transform: translateX(-6px); } to { opacity: 1; transform: translateX(0); } }
+
+    .log-time { color: var(--text-muted); white-space: nowrap; }
+    .log-type { border-radius: 4px; padding: 1px 6px; font-size: 9px; font-weight: 700; letter-spacing: 0.08em; }
+    .log-type.INFO  { background: rgba(56,130,255,0.15); color: var(--accent-blue); }
+    .log-type.WARN  { background: rgba(255,204,0,0.15);  color: var(--accent-yellow); }
+    .log-type.ALERT { background: rgba(255,59,92,0.2);   color: var(--accent-red); }
+    .log-type.OK    { background: rgba(0,255,157,0.12);  color: var(--accent-green); }
+    .log-msg { color: var(--text-secondary); flex: 1; }
+
+    /* ── Mini Stats Bar ── */
+    .stats-bar {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 1px;
+      background: var(--border);
+      border-radius: 10px;
+      overflow: hidden;
+      margin-bottom: 24px;
+      border: 1px solid var(--border);
+    }
+
+    .stat-tile {
+      background: var(--bg-card);
+      padding: 14px 20px;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+
+    .stat-icon {
+      font-size: 22px;
+      width: 40px;
+      height: 40px;
+      background: rgba(56,130,255,0.1);
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .stat-info { flex: 1; }
+
+    .stat-num {
+      font-family: var(--font-mono);
+      font-size: 20px;
+      font-weight: 700;
+      color: var(--text-primary);
+      line-height: 1;
+    }
+
+    .stat-label {
+      font-size: 10px;
+      color: var(--text-muted);
+      letter-spacing: 0.08em;
+      margin-top: 3px;
+    }
+
+    /* ── Responsive ── */
+    @media (max-width: 1100px) {
+      .cameras-grid { grid-template-columns: repeat(2, 1fr); }
+      .bottom-row { grid-template-columns: 1fr 1fr; }
+      .stats-bar { grid-template-columns: repeat(2, 1fr); }
+    }
+
+    @media (max-width: 700px) {
+      main { padding: 16px; }
+      .cameras-grid { grid-template-columns: 1fr; }
+      .bottom-row { grid-template-columns: 1fr; }
+      .stats-bar { grid-template-columns: repeat(2, 1fr); }
+      header { padding: 12px 16px; }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- ─── HEADER ─── -->
+  <header>
+    <div class="logo">
+      <div class="logo-icon">🏍️</div>
+      <div class="logo-text">
+        <h1>BLINDGUARD</h1>
+        <p>MOTORCYCLE SAFETY SYSTEM v2.1</p>
+      </div>
+    </div>
+    <div class="header-right">
+      <div class="status-pill">
+        <div class="status-dot"></div>
+        SYSTEM ONLINE
+      </div>
+      <div class="clock" id="clock">--:--:--</div>
+    </div>
+  </header>
+
+  <!-- ─── MAIN ─── -->
+  <main>
+
+    <!-- COLLISION ALERT BANNER -->
+    <div id="collision-alert">
+      <div class="alert-icon">⚠️</div>
+      <div class="alert-content">
+        <h2>⛔ COLLISION WARNING DETECTED</h2>
+        <p id="alert-detail">Vehicle detected in blind spot — immediate action required</p>
+      </div>
+      <div class="alert-side" id="alert-side">RIGHT BLINDSPOT</div>
+    </div>
+
+    <!-- STATS BAR -->
+    <div class="stats-bar">
+      <div class="stat-tile">
+        <div class="stat-icon">📷</div>
+        <div class="stat-info">
+          <div class="stat-num" id="stat-cameras">3/3</div>
+          <div class="stat-label">CAMERAS ONLINE</div>
+        </div>
+      </div>
+      <div class="stat-tile">
+        <div class="stat-icon">💡</div>
+        <div class="stat-info">
+          <div class="stat-num" id="stat-leds">0</div>
+          <div class="stat-label">LEDs ACTIVE</div>
+        </div>
+      </div>
+      <div class="stat-tile">
+        <div class="stat-icon">📡</div>
+        <div class="stat-info">
+          <div class="stat-num" id="stat-radar">CLEAR</div>
+          <div class="stat-label">RADAR STATUS</div>
+        </div>
+      </div>
+      <div class="stat-tile">
+        <div class="stat-icon">🔺</div>
+        <div class="stat-info">
+          <div class="stat-num" id="stat-alerts">0</div>
+          <div class="stat-label">ALERTS TODAY</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- CAMERA GRID -->
+    <div class="cameras-grid">
+
+      <!-- CAM 1: Front -->
+      <div class="card camera-card" id="cam-card-front">
+        <div class="card-header">
+          <div class="card-title">
+            <span class="dot"></span>
+            FRONT CAMERA
+          </div>
+          <div class="card-badge">CAM-01 · 320×240</div>
+        </div>
+        <div class="camera-viewport">
+          <canvas class="camera-feed-canvas" id="canvas-front" width="320" height="240"></canvas>
+          <div class="cam-overlay">
+            <div class="cam-label">FRONT · cv2:0</div>
+            <div class="cam-rec"><div class="cam-rec-dot"></div>REC</div>
+          </div>
+          <div class="detection-box" id="det-front" style="top:25%;left:28%;width:44%;height:50%;">
+            <div class="detection-label">VEHICLE 82%</div>
+          </div>
+        </div>
+        <div class="camera-stats">
+          <div class="cam-stat">
+            <div class="cam-stat-val" id="fps-front">30</div>
+            <div class="cam-stat-lbl">FPS</div>
+          </div>
+          <div class="cam-stat">
+            <div class="cam-stat-val" id="det-count-front">0</div>
+            <div class="cam-stat-lbl">OBJECTS</div>
+          </div>
+          <div class="cam-stat">
+            <div class="cam-stat-val" id="conf-front">--</div>
+            <div class="cam-stat-lbl">CONF</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- CAM 2: Right Blindspot -->
+      <div class="card camera-card" id="cam-card-right">
+        <div class="card-header">
+          <div class="card-title">
+            <span class="dot"></span>
+            RIGHT BLINDSPOT
+          </div>
+          <div class="card-badge">CAM-02 · 320×240</div>
+        </div>
+        <div class="camera-viewport">
+          <canvas class="camera-feed-canvas" id="canvas-right" width="320" height="240"></canvas>
+          <div class="cam-overlay">
+            <div class="cam-label">RIGHT · cv2:1</div>
+            <div class="cam-rec"><div class="cam-rec-dot"></div>REC</div>
+          </div>
+          <div class="detection-box" id="det-right" style="top:20%;left:15%;width:55%;height:60%;">
+            <div class="detection-label">VEHICLE 91%</div>
+          </div>
+        </div>
+        <div class="camera-stats">
+          <div class="cam-stat">
+            <div class="cam-stat-val" id="fps-right">30</div>
+            <div class="cam-stat-lbl">FPS</div>
+          </div>
+          <div class="cam-stat">
+            <div class="cam-stat-val" id="det-count-right">0</div>
+            <div class="cam-stat-lbl">OBJECTS</div>
+          </div>
+          <div class="cam-stat">
+            <div class="cam-stat-val" id="conf-right">--</div>
+            <div class="cam-stat-lbl">CONF</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- CAM 3: Rear -->
+      <div class="card camera-card" id="cam-card-rear">
+        <div class="card-header">
+          <div class="card-title">
+            <span class="dot"></span>
+            REAR CAMERA
+          </div>
+          <div class="card-badge">CAM-03 · 320×240</div>
+        </div>
+        <div class="camera-viewport">
+          <canvas class="camera-feed-canvas" id="canvas-rear" width="320" height="240"></canvas>
+          <div class="cam-overlay">
+            <div class="cam-label">REAR · cv2:2</div>
+            <div class="cam-rec"><div class="cam-rec-dot"></div>REC</div>
+          </div>
+          <div class="detection-box" id="det-rear" style="top:30%;left:35%;width:30%;height:40%;">
+            <div class="detection-label">VEHICLE 74%</div>
+          </div>
+        </div>
+        <div class="camera-stats">
+          <div class="cam-stat">
+            <div class="cam-stat-val" id="fps-rear">30</div>
+            <div class="cam-stat-lbl">FPS</div>
+          </div>
+          <div class="cam-stat">
+            <div class="cam-stat-val" id="det-count-rear">0</div>
+            <div class="cam-stat-lbl">OBJECTS</div>
+          </div>
+          <div class="cam-stat">
+            <div class="cam-stat-val" id="conf-rear">--</div>
+            <div class="cam-stat-lbl">CONF</div>
+          </div>
+        </div>
+      </div>
+
+    </div><!-- /cameras-grid -->
+
+    <!-- BOTTOM ROW -->
+    <div class="bottom-row">
+
+      <!-- LED Status Panel -->
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title"><span class="dot" style="background:var(--accent-green)"></span>LED STATUS</div>
+          <div class="card-badge">GPIO OUTPUTS</div>
+        </div>
+        <div class="led-panel">
+
+          <div class="led-item" id="led-right">
+            <div class="led-bulb"></div>
+            <div class="led-info">
+              <div class="led-name">Right Warning LED</div>
+              <div class="led-desc">GPIO 22 · Right blindspot alert</div>
+            </div>
+            <div class="led-status" id="led-right-status">OFF</div>
+          </div>
+
+          <div class="led-item" id="led-motor">
+            <div class="led-bulb"></div>
+            <div class="led-info">
+              <div class="led-name">Haptic Motor</div>
+              <div class="led-desc">GPIO 25 · Vibration alert output</div>
+            </div>
+            <div class="led-status" id="led-motor-status">OFF</div>
+          </div>
+
+          <div class="led-item" id="led-system">
+            <div class="led-bulb"></div>
+            <div class="led-info">
+              <div class="led-name">System Status LED</div>
+              <div class="led-desc">Heartbeat · System health indicator</div>
+            </div>
+            <div class="led-status" id="led-system-status">ON</div>
+          </div>
+
+        </div>
+      </div>
+
+      <!-- Radar & Sensor Panel -->
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title"><span class="dot" style="background:var(--accent-yellow)"></span>RADAR · IMU SENSORS</div>
+          <div class="card-badge">mmWave + MPU6050</div>
+        </div>
+        <div class="sensor-body">
+          <div class="radar-ring">
+            <canvas class="radar-canvas" id="radar-canvas" width="140" height="140"></canvas>
+            <div class="radar-center-val">
+              <span class="big" id="radar-dist">--</span>
+              <span class="unit">METERS</span>
+            </div>
+          </div>
+
+          <div class="lean-indicator">
+            <div class="lean-labels">
+              <span>◀ 45°</span>
+              <span>LEAN ANGLE</span>
+              <span>45° ▶</span>
+            </div>
+            <div class="lean-track"></div>
+            <div class="lean-fill-left"  id="lean-fill-left"  style="width:0%"></div>
+            <div class="lean-fill-right" id="lean-fill-right" style="width:0%"></div>
+            <div class="lean-needle" id="lean-needle" style="left:50%;transform:translateX(-50%)"></div>
+            <div class="lean-val-display" id="lean-val">0.0°</div>
+          </div>
+
+          <div class="sensor-row">
+            <div class="sensor-row-label"><span class="icon">📡</span> Radar Status</div>
+            <div class="sensor-row-val" id="radar-status">SCANNING</div>
+          </div>
+          <div class="sensor-row">
+            <div class="sensor-row-label"><span class="icon">📐</span> Roll Angle</div>
+            <div class="sensor-row-val" id="roll-val">0.0°</div>
+          </div>
+          <div class="sensor-row">
+            <div class="sensor-row-label"><span class="icon">🔗</span> UART Port</div>
+            <div class="sensor-row-val">/dev/ttyAMA2</div>
+          </div>
+          <div class="sensor-row">
+            <div class="sensor-row-label"><span class="icon">⚡</span> Baud Rate</div>
+            <div class="sensor-row-val">115200</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Event Log -->
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title"><span class="dot" style="background:var(--accent-orange)"></span>EVENT LOG</div>
+          <div class="card-badge" id="log-count">0 entries</div>
+        </div>
+        <div class="log-body" id="log-body"></div>
+      </div>
+
+    </div><!-- /bottom-row -->
+
+  </main>
+
+  <script>
+    // ═══════════════════════════════════════════════════════
+    //  DASHBOARD SIMULATION ENGINE
+    //  Replace the simulated state updates with WebSocket
+    //  calls to your Python backend for live data.
+    // ═══════════════════════════════════════════════════════
+
+    // --- Clock ---
+    function updateClock() {
+      const now = new Date();
+      document.getElementById('clock').textContent =
+        now.toLocaleTimeString('en-GB', { hour12: false });
+    }
+    setInterval(updateClock, 1000);
+    updateClock();
+
+    // --- State ---
+    let state = {
+      radarTriggered: false,
+      vehicleDetected: false,
+      leanAngle: 0,
+      radarDist: 0,
+      alertCount: 0,
+      logCount: 0,
+      frameCounters: { front: 0, right: 0, rear: 0 },
+      fpsTimers:     { front: Date.now(), right: Date.now(), rear: Date.now() },
+      fps:           { front: 30, right: 30, rear: 30 },
+    };
+
+    // ── CANVAS CAMERA SIMULATORS ──────────────────────────
+    const cameras = {
+      front: { canvas: document.getElementById('canvas-front'), hue: 200, moving: [] },
+      right: { canvas: document.getElementById('canvas-right'), hue: 220, moving: [] },
+      rear:  { canvas: document.getElementById('canvas-rear'),  hue: 185, moving: [] },
+    };
+
+    // Init moving "vehicles" for simulation
+    for (const key of Object.keys(cameras)) {
+      for (let i = 0; i < 2; i++) {
+        cameras[key].moving.push({
+          x: Math.random() * 280,
+          y: Math.random() * 200,
+          w: 30 + Math.random() * 50,
+          h: 20 + Math.random() * 30,
+          vx: (Math.random() - 0.5) * 2.5,
+          vy: (Math.random() - 0.5) * 1.5,
+          color: `hsl(${Math.random()*40+190}, 60%, 50%)`,
+        });
+      }
+    }
+
+    function drawCameraFeed(key) {
+      const cam = cameras[key];
+      const ctx = cam.canvas.getContext('2d');
+      const W = 320, H = 240;
+
+      // Background sky/road gradient
+      const bg = ctx.createLinearGradient(0, 0, 0, H);
+      bg.addColorStop(0,   `hsl(${cam.hue},25%,8%)`);
+      bg.addColorStop(0.55,`hsl(${cam.hue},20%,12%)`);
+      bg.addColorStop(0.56,`hsl(30,15%,10%)`);
+      bg.addColorStop(1,   `hsl(30,10%,7%)`);
+      ctx.fillStyle = bg;
+      ctx.fillRect(0, 0, W, H);
+
+      // Road lines
+      ctx.strokeStyle = 'rgba(255,255,255,0.12)';
+      ctx.lineWidth = 2;
+      ctx.setLineDash([18, 14]);
+      const t = Date.now() / 400;
+      for (let lx = -W; lx < W*2; lx += 30) {
+        ctx.beginPath();
+        ctx.moveTo(W/2 + (lx)/3, H*0.56);
+        ctx.lineTo(W/2 + lx,      H);
+        ctx.stroke();
+      }
+      ctx.setLineDash([]);
+
+      // Horizon glow
+      const horiz = ctx.createRadialGradient(W/2, H*0.55, 0, W/2, H*0.55, W*0.6);
+      horiz.addColorStop(0,   `hsla(${cam.hue},80%,60%,0.08)`);
+      horiz.addColorStop(1,   'transparent');
+      ctx.fillStyle = horiz;
+      ctx.fillRect(0, 0, W, H);
+
+      // Moving vehicles
+      for (const v of cam.moving) {
+        v.x += v.vx; v.y += v.vy;
+        if (v.x < -v.w)  v.x = W;
+        if (v.x > W)     v.x = -v.w;
+        if (v.y < H*0.4) v.vy =  Math.abs(v.vy);
+        if (v.y > H-v.h) v.vy = -Math.abs(v.vy);
+
+        // Car body
+        ctx.fillStyle = v.color;
+        ctx.beginPath();
+        ctx.roundRect(v.x, v.y, v.w, v.h, 4);
+        ctx.fill();
+
+        // Headlights
+        ctx.fillStyle = 'rgba(255,255,200,0.9)';
+        ctx.beginPath();
+        ctx.arc(v.x + 4,        v.y + v.h/2, 3, 0, Math.PI*2);
+        ctx.arc(v.x + v.w - 4,  v.y + v.h/2, 3, 0, Math.PI*2);
+        ctx.fill();
+      }
+
+      // Noise overlay
+      const imgData = ctx.getImageData(0, 0, W, H);
+      const d = imgData.data;
+      for (let i = 0; i < d.length; i += 4) {
+        const n = (Math.random() - 0.5) * 14;
+        d[i] += n; d[i+1] += n; d[i+2] += n;
+      }
+      ctx.putImageData(imgData, 0, 0);
+
+      // Grid overlay (night vision feel)
+      ctx.strokeStyle = `hsla(${cam.hue},80%,70%,0.04)`;
+      ctx.lineWidth = 0.5;
+      for (let gx = 0; gx < W; gx += 20) {
+        ctx.beginPath(); ctx.moveTo(gx,0); ctx.lineTo(gx,H); ctx.stroke();
+      }
+      for (let gy = 0; gy < H; gy += 20) {
+        ctx.beginPath(); ctx.moveTo(0,gy); ctx.lineTo(W,gy); ctx.stroke();
+      }
+
+      // Timestamp
+      ctx.fillStyle = 'rgba(0,212,255,0.6)';
+      ctx.font = '9px Share Tech Mono, monospace';
+      ctx.fillText(new Date().toISOString().replace('T',' ').slice(0,19), 8, H-8);
+
+      state.frameCounters[key]++;
+      const now = Date.now();
+      if (now - state.fpsTimers[key] >= 1000) {
+        state.fps[key] = state.frameCounters[key];
+        state.frameCounters[key] = 0;
+        state.fpsTimers[key] = now;
+        document.getElementById(`fps-${key}`).textContent = state.fps[key];
+      }
+    }
+
+    // ── RADAR CANVAS ──────────────────────────────────────
+    const radarCtx = document.getElementById('radar-canvas').getContext('2d');
+    let radarAngle = 0;
+
+    function drawRadar() {
+      const ctx = radarCtx;
+      const cx = 70, cy = 70, R = 60;
+      ctx.clearRect(0, 0, 140, 140);
+
+      // Rings
+      for (let r = R; r > 0; r -= R/4) {
+        ctx.beginPath();
+        ctx.arc(cx, cy, r, 0, Math.PI*2);
+        ctx.strokeStyle = `rgba(0,212,255,${r===R?0.3:0.1})`;
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      }
+
+      // Cross hairs
+      ctx.strokeStyle = 'rgba(0,212,255,0.08)';
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(cx-R,cy); ctx.lineTo(cx+R,cy); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(cx,cy-R); ctx.lineTo(cx,cy+R); ctx.stroke();
+
+      // Sweep gradient
+      const sweepGrad = ctx.createConicalGradient
+        ? ctx.createConicalGradient(cx, cy, radarAngle - 0.8, radarAngle)
+        : null;
+
+      // Fallback sweep arc
+      ctx.save();
+      ctx.translate(cx, cy);
+      ctx.rotate(radarAngle);
+      const g = ctx.createLinearGradient(0, 0, R, 0);
+      g.addColorStop(0, 'rgba(0,212,255,0.5)');
+      g.addColorStop(1, 'rgba(0,212,255,0)');
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.arc(0, 0, R, -0.5, 0.5);
+      ctx.closePath();
+      ctx.fillStyle = g;
+      ctx.fill();
+      ctx.restore();
+
+      radarAngle += 0.05;
+      if (radarAngle > Math.PI*2) radarAngle = 0;
+
+      // Blips
+      if (state.radarTriggered) {
+        const blipAngle = radarAngle - 0.1;
+        const blipR = R * 0.55;
+        const bx = cx + Math.cos(blipAngle) * blipR;
+        const by = cy + Math.sin(blipAngle) * blipR;
+        ctx.beginPath();
+        ctx.arc(bx, by, 4 + Math.sin(Date.now()/200)*2, 0, Math.PI*2);
+        ctx.fillStyle = 'rgba(255,59,92,0.9)';
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(bx, by, 8, 0, Math.PI*2);
+        ctx.strokeStyle = 'rgba(255,59,92,0.4)';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      }
+
+      // Center dot
+      ctx.beginPath();
+      ctx.arc(cx, cy, 3, 0, Math.PI*2);
+      ctx.fillStyle = '#00d4ff';
+      ctx.fill();
+    }
+
+    // ── LED CONTROL ───────────────────────────────────────
+    function setLED(id, active, isAlert = false) {
+      const el = document.getElementById(id);
+      const statusEl = document.getElementById(id + '-status');
+      el.classList.toggle('active',    active && !isAlert);
+      el.classList.toggle('alert-led', active && isAlert);
+      statusEl.textContent = active ? (isAlert ? 'ALERT' : 'ON') : 'OFF';
+    }
+
+    // ── COLLISION ALERT ───────────────────────────────────
+    function triggerCollisionAlert(side, confidence) {
+      const banner = document.getElementById('collision-alert');
+      banner.classList.add('active');
+      document.getElementById('alert-detail').textContent =
+        `Vehicle detected in ${side} blind spot · Confidence ${confidence}% · Radar CONFIRM`;
+      document.getElementById('alert-side').textContent = side.toUpperCase() + ' BLINDSPOT';
+
+      // Camera card highlight
+      document.getElementById('cam-card-right').classList.add('alert-cam');
+
+      // Detection box
+      document.getElementById('det-right').classList.add('active');
+      document.getElementById('det-count-right').textContent = '1';
+      document.getElementById('conf-right').textContent = confidence + '%';
+
+      // LEDs
+      setLED('led-right', true, true);
+      setLED('led-motor', true, true);
+
+      // Stats
+      state.alertCount++;
+      document.getElementById('stat-alerts').textContent = state.alertCount;
+      document.getElementById('stat-radar').textContent  = 'DETECT';
+      document.getElementById('stat-radar').style.color  = 'var(--accent-red)';
+      document.getElementById('radar-status').textContent = 'TRIGGERED';
+      document.getElementById('radar-status').className  = 'sensor-row-val danger';
+      document.getElementById('stat-leds').textContent   = '2';
+    }
+
+    function clearCollisionAlert() {
+      document.getElementById('collision-alert').classList.remove('active');
+      document.getElementById('cam-card-right').classList.remove('alert-cam');
+      document.getElementById('det-right').classList.remove('active');
+      document.getElementById('det-count-right').textContent = '0';
+      document.getElementById('conf-right').textContent = '--';
+      setLED('led-right', false);
+      setLED('led-motor', false);
+      document.getElementById('stat-radar').textContent = 'CLEAR';
+      document.getElementById('stat-radar').style.color = '';
+      document.getElementById('radar-status').textContent = 'SCANNING';
+      document.getElementById('radar-status').className  = 'sensor-row-val';
+      document.getElementById('stat-leds').textContent   = '1';
+    }
+
+    // ── EVENT LOG ─────────────────────────────────────────
+    function addLog(type, message) {
+      const log = document.getElementById('log-body');
+      const now = new Date().toLocaleTimeString('en-GB', { hour12: false });
+      const entry = document.createElement('div');
+      entry.className = 'log-entry';
+      entry.innerHTML = `
+        <span class="log-time">${now}</span>
+        <span class="log-type ${type}">${type}</span>
+        <span class="log-msg">${message}</span>
+      `;
+      log.insertBefore(entry, log.firstChild);
+      if (log.children.length > 50) log.removeChild(log.lastChild);
+      state.logCount++;
+      document.getElementById('log-count').textContent = `${state.logCount} entries`;
+    }
+
+    // ── LEAN ANGLE DISPLAY ────────────────────────────────
+    function updateLeanDisplay(angle) {
+      const clamped = Math.max(-45, Math.min(45, angle));
+      const pct = (Math.abs(clamped) / 45) * 45; // max 45% of half-bar
+      const pos = 50 + (clamped / 45) * 45; // center + offset%
+
+      document.getElementById('lean-needle').style.left = pos + '%';
+      document.getElementById('lean-val').textContent   = angle.toFixed(1) + '°';
+      document.getElementById('roll-val').textContent   = angle.toFixed(1) + '°';
+
+      if (clamped < 0) {
+        document.getElementById('lean-fill-left').style.width  = pct + '%';
+        document.getElementById('lean-fill-right').style.width = '0%';
+      } else {
+        document.getElementById('lean-fill-right').style.width = pct + '%';
+        document.getElementById('lean-fill-left').style.width  = '0%';
+      }
+
+      const rollEl = document.getElementById('roll-val');
+      if (Math.abs(angle) > 25) {
+        rollEl.className = 'sensor-row-val danger';
+      } else if (Math.abs(angle) > 15) {
+        rollEl.className = 'sensor-row-val warn';
+      } else {
+        rollEl.className = 'sensor-row-val';
+      }
+    }
+
+    // ── SIMULATION SCENARIO ENGINE ────────────────────────
+    let scenarioPhase  = 'idle';
+    let scenarioTimer  = 0;
+
+    function runScenario() {
+      const now = Date.now();
+      scenarioTimer++;
+
+      // Simulate lean angle oscillation
+      const rawLean = Math.sin(scenarioTimer * 0.03) * 18 + Math.sin(scenarioTimer * 0.07) * 7;
+      state.leanAngle = rawLean;
+      updateLeanDisplay(rawLean);
+
+      // Simulate radar distance
+      const baseDist = 8 + Math.sin(scenarioTimer * 0.04) * 4;
+      state.radarDist = baseDist;
+      document.getElementById('radar-dist').textContent = baseDist.toFixed(1);
+
+      // Phase-based scenario
+      if (scenarioPhase === 'idle' && scenarioTimer % 180 === 40) {
+        // Start detection event
+        scenarioPhase = 'radar';
+        state.radarTriggered = true;
+        addLog('WARN', 'mmWave radar DETECT signal received');
+      }
+
+      if (scenarioPhase === 'radar' && scenarioTimer % 180 === 55) {
+        // Camera confirms vehicle
+        scenarioPhase = 'alert';
+        state.vehicleDetected = true;
+        const conf = Math.floor(82 + Math.random() * 12);
+        triggerCollisionAlert('right', conf);
+        addLog('ALERT', `⚠ VEHICLE IN RIGHT BLINDSPOT — TFLite conf ${conf}% · Motor ON`);
+        addLog('INFO', 'GPIO 22 (LED) → HIGH · GPIO 25 (Motor) → HIGH');
+      }
+
+      if (scenarioPhase === 'alert' && scenarioTimer % 180 === 130) {
+        // Clear alert
+        scenarioPhase = 'clearing';
+        state.vehicleDetected = false;
+        state.radarTriggered  = false;
+        clearCollisionAlert();
+        addLog('OK', 'Threat cleared — GPIO outputs reset LOW');
+      }
+
+      if (scenarioPhase === 'clearing' && scenarioTimer % 180 === 155) {
+        scenarioPhase = 'idle';
+        addLog('INFO', 'System reset — scanning for hazards');
+      }
+    }
+
+    // ── BOOT SEQUENCE ─────────────────────────────────────
+    (function boot() {
+      setLED('led-system', true, false);
+      addLog('OK',   'System boot complete — all sensors online');
+      addLog('INFO', 'TFLite model yolov8n.tflite loaded, 4 threat classes active');
+      addLog('INFO', 'Cameras cv2:0, cv2:1, cv2:2 initialised at 320×240');
+      addLog('INFO', 'mmWave radar /dev/ttyAMA2 @ 115200 baud connected');
+      addLog('INFO', 'MPU6050 I2C:0x68 — IMU online, max lean 25°');
+    })();
+
+    // ── MAIN RENDER LOOP ──────────────────────────────────
+    function renderLoop() {
+      drawCameraFeed('front');
+      drawCameraFeed('right');
+      drawCameraFeed('rear');
+      drawRadar();
+      runScenario();
+      requestAnimationFrame(renderLoop);
+    }
+
+    renderLoop();
+
+    // ══════════════════════════════════════════════════════
+    //  LIVE DATA INTEGRATION (WebSocket)
+    //  To connect to real hardware, uncomment the block
+    //  below and run a WebSocket server from your Python
+    //  backend that pushes JSON state updates:
+    //
+    //  {
+    //    "radar": true/false,
+    //    "vehicle": true/false,
+    //    "led_right": true/false,
+    //    "led_motor": true/false,
+    //    "lean": 12.4,
+    //    "dist": 3.5,
+    //    "confidence": 87
+    //  }
+    // ══════════════════════════════════════════════════════
+    /*
+    const ws = new WebSocket('ws://localhost:8765');
+    ws.onmessage = (ev) => {
+      const d = JSON.parse(ev.data);
+      updateLeanDisplay(d.lean);
+      document.getElementById('radar-dist').textContent = d.dist.toFixed(1);
+      if (d.vehicle) {
+        triggerCollisionAlert('right', d.confidence);
+      } else {
+        clearCollisionAlert();
+      }
+      setLED('led-right', d.led_right, d.led_right);
+      setLED('led-motor', d.led_motor, d.led_motor);
+    };
+    */
+  </script>
+</body>
+</html>
