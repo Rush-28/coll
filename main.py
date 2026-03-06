@@ -1,72 +1,56 @@
 """
-main.py  — BlindGuard Bike Blind-Spot Collision Detection System
-================================================================
-Orchestrates:
-  • Camera  (camera.py)
-  • Vehicle detector / ML  (vehicle_detector.py)
-  • Collision engine / fusion  (collision_engine.py)
-  • Hardware outputs  (GPIO LED + vibration motor)
-  • MPU6050 IMU  (lean-angle guard)
-  • mmWave radar  (UART)
-  • Flask + SocketIO dashboard  (serves dashboard.html + real-time events)
+main.py  — BlindGuard Bike Blind-Spot System
+============================================
+  • Three live MJPEG camera streams: /stream/left  /stream/right  /stream/rear
+  • Vehicle detection overlay drawn in real-time on each stream frame
+  • Collision engine fuses right-camera detections + radar + IMU
+  • Flask-SocketIO pushes live status to dashboard.html every cycle
+  • GPIO: LED (WARNING+), Vibration motor (CRITICAL only)
 
 Architecture
-------------
-  ┌─────────────┐   ┌──────────────────┐   ┌──────────────────┐
-  │  MPU6050    │   │   mmWave Radar   │   │   USB Camera     │
-  │  (I²C)      │   │   (UART serial)  │   │   (threaded)     │
-  └──────┬──────┘   └────────┬─────────┘   └────────┬─────────┘
-         │                   │                       │
-         │                   │              ┌────────▼──────────┐
-         │                   │              │ VehicleDetector   │
-         │                   │              │ (TFLite YOLOv8n)  │
-         │                   │              └────────┬──────────┘
-         │                   │                       │
-         └───────────────────┴───────────┐           │
-                                         ▼           ▼
-                                   ┌─────────────────────┐
-                                   │   CollisionEngine    │
-                                   │   (fusion + alerts)  │
-                                   └──────────┬──────────┘
-                                              │
-                       ┌──────────────────────┼──────────────────────┐
-                       ▼                      ▼                      ▼
-                  GPIO LED            Vibration Motor        SocketIO push
-                (WARNING+)           (CRITICAL only)       (dashboard.html)
+────────────
+  MultiCameraManager (left / right / rear)
+       │
+       ├─ VehicleDetector (TFLite YOLOv8n, vehicle-only)
+       │        │
+       │        └──► CollisionEngine (fusion + threat scoring)
+       │                      │
+       │             GPIO LED + Vibration Motor
+       │
+  /stream/<role>  →  MJPEG generator (annotates frame, yields JPEG)
+  SocketIO        →  status_update event every loop cycle
 """
 
 import time
-import logging
 import threading
+import logging
+import io
 import serial
 import numpy as np
+import cv2
 
-# ── Hardware imports (Raspberry Pi only) ──────────────────────────────────
-# Wrapped in try/except so the code can be developed/tested on a PC too.
+# ── Hardware (Pi only) ────────────────────────────────────────────────────
 try:
     from gpiozero import LED, OutputDevice
     GPIO_AVAILABLE = True
 except (ImportError, Exception):
     GPIO_AVAILABLE = False
-    logging.warning("gpiozero not available — GPIO outputs will be simulated")
 
 try:
     from mpu6050 import mpu6050 as MPU6050Sensor
     IMU_AVAILABLE = True
 except (ImportError, Exception):
     IMU_AVAILABLE = False
-    logging.warning("mpu6050 library not available — lean angle will be 0")
 
-# ── Flask / SocketIO dashboard ─────────────────────────────────────────────
-from flask import Flask, render_template, jsonify
+# ── Web ───────────────────────────────────────────────────────────────────
+from flask import Flask, render_template, Response, jsonify
 from flask_socketio import SocketIO
 
-# ── Our own modules ───────────────────────────────────────────────────────
-from camera import Camera
-from vehicle_detector import VehicleDetector, ThreatZone
+# ── Our modules ───────────────────────────────────────────────────────────
+from camera import MultiCameraManager, DEFAULT_CAMERA_INDICES
+from vehicle_detector import VehicleDetector, ThreatZone, DetectionResult
 from collision_engine import CollisionEngine, SensorState, AlertLevel, Config
 
-# ── Logging ───────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -79,87 +63,56 @@ logger = logging.getLogger("main")
 # ==========================================================================
 
 class HWConfig:
-    # GPIO pin numbers (BCM numbering)
-    RIGHT_LED_PIN     = 22
-    RIGHT_MOTOR_PIN   = 25
+    # GPIO pins (BCM)
+    RIGHT_LED_PIN   = 22
+    RIGHT_MOTOR_PIN = 25
 
-    # Serial port for mmWave radar — adjust for your Pi UART assignment
-    RADAR_PORT        = "/dev/ttyAMA2"
-    RADAR_BAUD        = 115200
-    RADAR_TIMEOUT     = 0.1          # seconds
+    # mmWave radar UART
+    RADAR_PORT      = "/dev/ttyAMA2"
+    RADAR_BAUD      = 115200
+    RADAR_TIMEOUT   = 0.1
 
-    # Camera
-    CAMERA_INDEX      = 0
-    CAMERA_WIDTH      = 640
-    CAMERA_HEIGHT     = 480
-    CAMERA_FPS        = 30
+    # Camera device indices per logical role
+    CAMERA_INDICES  = {"left": 0, "right": 1, "rear": 2}
+    CAMERA_WIDTH    = 640
+    CAMERA_HEIGHT   = 480
+    CAMERA_FPS      = 30
 
-    # TFLite model file (place in same directory)
-    MODEL_PATH        = "yolov8n.tflite"
+    # TFLite model
+    MODEL_PATH      = "yolov8n.tflite"
 
-    # How often (seconds) the main loop runs
-    LOOP_INTERVAL     = 0.04         # ~25 Hz
+    # Main loop rate
+    LOOP_INTERVAL   = 0.04      # 25 Hz
 
-    # IMU I²C address
-    IMU_I2C_ADDR      = 0x68
+    # MJPEG stream quality (1–100)
+    JPEG_QUALITY    = 80
 
+    # Run ML on every N-th frame to save CPU
+    DETECT_EVERY_N  = 1
 
-# ==========================================================================
-# HARDWARE INITIALISATION
-# ==========================================================================
-
-def init_gpio() -> tuple:
-    """Return (led, motor) — real GPIO or safe stubs."""
-    if GPIO_AVAILABLE:
-        led   = LED(HWConfig.RIGHT_LED_PIN)
-        motor = OutputDevice(HWConfig.RIGHT_MOTOR_PIN)
-        logger.info("GPIO: LED and motor initialised")
-        return led, motor
-    # Stub objects for development / testing
-    class _Stub:
-        def on(self):  pass
-        def off(self): pass
-    return _Stub(), _Stub()
-
-
-def init_imu():
-    """Return MPU6050 sensor or None."""
-    if IMU_AVAILABLE:
-        try:
-            sensor = MPU6050Sensor(HWConfig.IMU_I2C_ADDR)
-            logger.info("IMU: MPU6050 initialised")
-            return sensor
-        except Exception as e:
-            logger.error(f"IMU init failed: {e}")
-    return None
-
-
-def init_radar() -> serial.Serial | None:
-    """Return open Serial port for radar or None."""
-    try:
-        port = serial.Serial(
-            HWConfig.RADAR_PORT,
-            baudrate=HWConfig.RADAR_BAUD,
-            timeout=HWConfig.RADAR_TIMEOUT,
-        )
-        logger.info(f"Radar: connected on {HWConfig.RADAR_PORT}")
-        return port
-    except Exception as e:
-        logger.warning(f"Radar not available ({e}) — will use camera-only mode")
-        return None
+    # IMU
+    IMU_I2C_ADDR    = 0x68
 
 
 # ==========================================================================
-# FLASK / SOCKETIO SETUP
+# FLASK + SOCKETIO
 # ==========================================================================
 
-app     = Flask(__name__, template_folder=".")
+app      = Flask(__name__, template_folder=".")
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 
-# Shared state pushed to the dashboard
-_dashboard_state: dict = {}
-_dashboard_lock = threading.Lock()
+# Shared annotated frames for MJPEG streaming (one per camera role)
+_stream_frames: dict[str, bytes | None] = {"left": None, "right": None, "rear": None}
+_stream_lock = threading.Lock()
 
+# Live dashboard state
+_dashboard_state: dict = {}
+_dash_lock = threading.Lock()
+
+
+# ==========================================================================
+# ROUTES
+# ==========================================================================
 
 @app.route("/")
 def index():
@@ -168,89 +121,260 @@ def index():
 
 @app.route("/api/status")
 def api_status():
-    with _dashboard_lock:
+    with _dash_lock:
         return jsonify(_dashboard_state)
 
 
+def _mjpeg_generator(role: str):
+    """Yield MJPEG boundary frames for the given camera role."""
+    boundary = b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"
+    while True:
+        with _stream_lock:
+            jpeg = _stream_frames.get(role)
+
+        if jpeg is None:
+            # Send a blank dark frame while camera warms up
+            blank = np.zeros((HWConfig.CAMERA_HEIGHT, HWConfig.CAMERA_WIDTH, 3), dtype=np.uint8)
+            _draw_offline_overlay(blank, role)
+            _, enc = cv2.imencode(".jpg", blank, [cv2.IMWRITE_JPEG_QUALITY, HWConfig.JPEG_QUALITY])
+            jpeg = enc.tobytes()
+
+        yield boundary + jpeg + b"\r\n"
+        time.sleep(0.033)  # ~30 fps cap for the HTTP stream
+
+
+@app.route("/stream/left")
+def stream_left():
+    return Response(
+        _mjpeg_generator("left"),
+        mimetype="multipart/x-mixed-replace; boundary=frame",
+    )
+
+
+@app.route("/stream/right")
+def stream_right():
+    return Response(
+        _mjpeg_generator("right"),
+        mimetype="multipart/x-mixed-replace; boundary=frame",
+    )
+
+
+@app.route("/stream/rear")
+def stream_rear():
+    return Response(
+        _mjpeg_generator("rear"),
+        mimetype="multipart/x-mixed-replace; boundary=frame",
+    )
+
+
 # ==========================================================================
-# LEAN ANGLE HELPER
+# FRAME ANNOTATION HELPERS
 # ==========================================================================
 
-def read_lean_angle(imu) -> tuple[float, bool]:
-    """
-    Returns (roll_degrees, imu_ok).
-    Roll is the left-right tilt of the bike.
-    """
+# Colour palette per zone
+_ZONE_COLOUR = {
+    ThreatZone.CRITICAL: (0,   0,   255),   # red
+    ThreatZone.WARNING:  (0,   140, 255),   # orange
+    ThreatZone.MONITOR:  (0,   220, 60),    # green
+    ThreatZone.CLEAR:    (80,  80,  80),
+}
+
+# Label colour per alert level (used for the HUD bar)
+_ALERT_COLOUR = {
+    AlertLevel.CRITICAL: (0,   0,   255),
+    AlertLevel.WARNING:  (0,   120, 255),
+    AlertLevel.MONITOR:  (0,   200, 60),
+    AlertLevel.CLEAR:    (60,  60,  60),
+}
+
+_FONT    = cv2.FONT_HERSHEY_SIMPLEX
+_MONO    = cv2.FONT_HERSHEY_PLAIN
+
+
+def _draw_detections(frame: np.ndarray, result: DetectionResult | None):
+    """Draw bounding boxes, labels, and confidence on the frame (in-place)."""
+    if result is None or not result.vehicle_detected:
+        return
+    for det in result.detections:
+        x1, y1, x2, y2 = det.box
+        colour = _ZONE_COLOUR[det.zone]
+
+        # Box outline — thicker for higher threat
+        thickness = 3 if det.zone == ThreatZone.CRITICAL else 2
+        cv2.rectangle(frame, (x1, y1), (x2, y2), colour, thickness)
+
+        # Glow effect — second, slightly larger, semi-transparent rect
+        overlay = frame.copy()
+        cv2.rectangle(overlay, (x1-2, y1-2), (x2+2, y2+2), colour, 1)
+        cv2.addWeighted(overlay, 0.35, frame, 0.65, 0, frame)
+
+        # Label background
+        label = f"{det.class_name.upper()} {det.confidence:.0%}  [{det.zone.name}]"
+        (tw, th), baseline = cv2.getTextSize(label, _FONT, 0.46, 1)
+        label_y = max(y1 - 4, th + 4)
+        cv2.rectangle(frame,
+                      (x1, label_y - th - baseline - 2),
+                      (x1 + tw + 4, label_y + 2),
+                      colour, cv2.FILLED)
+        cv2.putText(frame, label,
+                    (x1 + 2, label_y - baseline),
+                    _FONT, 0.46, (255, 255, 255), 1, cv2.LINE_AA)
+
+
+def _draw_hud(
+    frame:      np.ndarray,
+    role:       str,
+    alert:      AlertLevel,
+    result:     DetectionResult | None,
+    cam_index:  int,
+    fps:        float,
+):
+    """Draw the HUD overlay: role label, timestamp, FPS, alert status bar."""
+    h, w = frame.shape[:2]
+    ts = time.strftime("%H:%M:%S")
+    colour = _ALERT_COLOUR[alert]
+
+    # ── Top-left: role badge ─────────────────────────────────────────
+    role_label = role.upper()
+    cv2.rectangle(frame, (0, 0), (len(role_label) * 10 + 16, 22), (0, 0, 0), cv2.FILLED)
+    cv2.putText(frame, role_label, (8, 15), _FONT, 0.52, (0, 212, 255), 1, cv2.LINE_AA)
+
+    # ── Top-right: CAM index + FPS ───────────────────────────────────
+    top_right = f"CAM-{cam_index:02d}  {fps:.0f}fps"
+    (tw, _), _ = cv2.getTextSize(top_right, _MONO, 1.0, 1)
+    cv2.rectangle(frame, (w - tw - 14, 0), (w, 18), (0, 0, 0), cv2.FILLED)
+    cv2.putText(frame, top_right, (w - tw - 8, 13), _MONO, 1.0, (100, 100, 100), 1, cv2.LINE_AA)
+
+    # ── Bottom-left: timestamp ───────────────────────────────────────
+    cv2.rectangle(frame, (0, h - 20), (200, h), (0, 0, 0), cv2.FILLED)
+    cv2.putText(frame, ts, (6, h - 5), _MONO, 1.0, (0, 170, 200), 1, cv2.LINE_AA)
+
+    # ── Bottom-right: REC dot ────────────────────────────────────────
+    rec_col = (0, 0, 255) if int(time.time() * 2) % 2 == 0 else (60, 60, 60)
+    cv2.circle(frame, (w - 14, h - 10), 5, rec_col, cv2.FILLED)
+    cv2.putText(frame, "REC", (w - 42, h - 5), _MONO, 1.0, rec_col, 1, cv2.LINE_AA)
+
+    # ── Bottom alert bar (only when WARNING/CRITICAL) ────────────────
+    if alert.value >= AlertLevel.WARNING.value:
+        n_det = len(result.detections) if result else 0
+        bar_text = f"  ⚠  {alert.name} — {n_det} VEHICLE(S) DETECTED"
+        (bw, bh), _ = cv2.getTextSize(bar_text, _FONT, 0.5, 1)
+        bar_y = h - 40
+        cv2.rectangle(frame, (0, bar_y - bh - 6), (w, bar_y + 8), (0, 0, 0), cv2.FILLED)
+        cv2.rectangle(frame, (0, bar_y - bh - 6), (4, bar_y + 8), colour, cv2.FILLED)
+        cv2.putText(frame, bar_text, (10, bar_y), _FONT, 0.5, colour, 1, cv2.LINE_AA)
+
+    # ── Corner brackets ──────────────────────────────────────────────
+    _draw_corner_brackets(frame, colour if alert.value >= AlertLevel.WARNING.value else (0, 100, 140))
+
+
+def _draw_corner_brackets(frame: np.ndarray, colour: tuple, size: int = 18, t: int = 2):
+    h, w = frame.shape[:2]
+    corners = [(0, 0, 1, 1), (w, 0, -1, 1), (0, h, 1, -1), (w, h, -1, -1)]
+    for cx, cy, sx, sy in corners:
+        cv2.line(frame, (cx, cy), (cx + sx * size, cy), colour, t)
+        cv2.line(frame, (cx, cy), (cx, cy + sy * size), colour, t)
+
+
+def _draw_offline_overlay(frame: np.ndarray, role: str):
+    h, w = frame.shape[:2]
+    cv2.putText(frame, f"{role.upper()} CAMERA", (w//2 - 80, h//2 - 14),
+                _FONT, 0.7, (60, 60, 60), 1, cv2.LINE_AA)
+    cv2.putText(frame, "NO SIGNAL", (w//2 - 60, h//2 + 14),
+                _FONT, 0.6, (40, 40, 40), 1, cv2.LINE_AA)
+
+
+def _encode_jpeg(frame: np.ndarray) -> bytes:
+    _, enc = cv2.imencode(".jpg", frame,
+                          [cv2.IMWRITE_JPEG_QUALITY, HWConfig.JPEG_QUALITY])
+    return enc.tobytes()
+
+
+# ==========================================================================
+# HARDWARE HELPERS
+# ==========================================================================
+
+def _init_gpio():
+    if GPIO_AVAILABLE:
+        return LED(HWConfig.RIGHT_LED_PIN), OutputDevice(HWConfig.RIGHT_MOTOR_PIN)
+    class _Stub:
+        def on(self): pass
+        def off(self): pass
+    return _Stub(), _Stub()
+
+
+def _init_imu():
+    if IMU_AVAILABLE:
+        try:
+            return MPU6050Sensor(HWConfig.IMU_I2C_ADDR)
+        except Exception as e:
+            logger.warning(f"IMU init failed: {e}")
+    return None
+
+
+def _init_radar():
+    try:
+        port = serial.Serial(HWConfig.RADAR_PORT, HWConfig.RADAR_BAUD,
+                             timeout=HWConfig.RADAR_TIMEOUT)
+        logger.info(f"Radar on {HWConfig.RADAR_PORT}")
+        return port
+    except Exception as e:
+        logger.warning(f"Radar unavailable ({e}) — camera-only mode")
+        return None
+
+
+def _read_lean(imu) -> tuple[float, bool]:
     if imu is None:
         return 0.0, False
     try:
-        accel = imu.get_accel_data()
-        roll  = float(np.degrees(np.arctan2(accel['y'], accel['z'])))
-        return roll, True
-    except Exception as e:
-        logger.debug(f"IMU read error: {e}")
+        a = imu.get_accel_data()
+        return float(np.degrees(np.arctan2(a["y"], a["z"]))), True
+    except Exception:
         return 0.0, False
 
 
-# ==========================================================================
-# RADAR HELPER
-# ==========================================================================
-
-def read_radar(port: serial.Serial | None) -> tuple[bool, float | None]:
-    """
-    Returns (triggered, distance_m | None).
-
-    Supports two common mmWave message formats:
-      1. "DETECT <distance_m>"  — e.g. "DETECT 1.23"
-      2. Plain "DETECT"         — no distance data
-    Extend this function to match your sensor's actual protocol.
-    """
+def _read_radar(port) -> tuple[bool, float | None]:
     if port is None:
         return False, None
     try:
         if port.in_waiting == 0:
             return False, None
         line = port.readline().decode("utf-8", errors="ignore").strip()
-        if not line:
-            return False, None
-
         parts = line.split()
         if "DETECT" in parts:
-            triggered = True
             dist = None
             try:
                 dist = float(parts[parts.index("DETECT") + 1])
             except (IndexError, ValueError):
                 pass
-            return triggered, dist
-
+            return True, dist
         return False, None
-    except Exception as e:
-        logger.debug(f"Radar read error: {e}")
+    except Exception:
         return False, None
 
 
 # ==========================================================================
-# MAIN SENSOR LOOP (runs in background thread)
+# SENSOR LOOP (background thread)
 # ==========================================================================
 
 def sensor_loop():
     """
-    Background thread:
-    1. Read all sensors → build SensorState
-    2. Run ML inference on camera frame
-    3. Fuse with CollisionEngine → CollisionAlert
-    4. Drive GPIO outputs
-    5. Push update to dashboard via SocketIO
+    25 Hz loop:
+      1. Read all sensors
+      2. Run ML on each camera frame
+      3. Fuse with CollisionEngine (using right-camera + radar + IMU)
+      4. Drive GPIO
+      5. Update MJPEG stream frames for all three cameras
+      6. Push SocketIO status event
     """
-    logger.info("Sensor loop starting …")
+    logger.info("Sensor loop starting…")
 
-    # ── Hardware setup ──────────────────────────────────────────────
-    led, motor = init_gpio()
-    imu        = init_imu()
-    radar      = init_radar()
-    camera     = Camera(
-        index=HWConfig.CAMERA_INDEX,
+    led, motor = _init_gpio()
+    imu        = _init_imu()
+    radar      = _init_radar()
+
+    cam_mgr  = MultiCameraManager(
+        indices=HWConfig.CAMERA_INDICES,
         width=HWConfig.CAMERA_WIDTH,
         height=HWConfig.CAMERA_HEIGHT,
         fps=HWConfig.CAMERA_FPS,
@@ -260,110 +384,154 @@ def sensor_loop():
 
     frame_count = 0
 
+    # Per-camera state
+    results:    dict[str, DetectionResult | None] = {r: None for r in cam_mgr.roles()}
+    fps_counts: dict[str, int]   = {r: 0 for r in cam_mgr.roles()}
+    fps_timers: dict[str, float] = {r: time.time() for r in cam_mgr.roles()}
+    fps_vals:   dict[str, float] = {r: 0.0 for r in cam_mgr.roles()}
+
+    # Camera index map for HUD
+    cam_idx = {"left": HWConfig.CAMERA_INDICES.get("left", 0),
+               "right": HWConfig.CAMERA_INDICES.get("right", 1),
+               "rear": HWConfig.CAMERA_INDICES.get("rear", 2)}
+
+    # Last published alert (to annotate all frames with coherent status)
+    last_alert = AlertLevel.CLEAR
+
     try:
         while True:
-            t_start = time.time()
+            t0 = time.time()
             frame_count += 1
 
             # ── 1. IMU ───────────────────────────────────────────────
-            lean_angle, imu_ok = read_lean_angle(imu)
+            lean_angle, imu_ok = _read_lean(imu)
 
             # ── 2. Radar ─────────────────────────────────────────────
-            radar_triggered, radar_dist = read_radar(radar)
+            radar_triggered, radar_dist = _read_radar(radar)
 
-            # ── 3. Camera + ML ───────────────────────────────────────
-            cam_ok_flag        = camera.is_ok
-            vehicle_detected   = False
-            cam_zone           = ThreatZone.CLEAR
-            cam_conf           = 0.0
-            detection_result   = None
+            # ── 3. Camera + ML for ALL three cameras ─────────────────
+            run_ml = (frame_count % HWConfig.DETECT_EVERY_N == 0)
 
-            if cam_ok_flag:
-                ret, frame = camera.get_latest_frame()
-                if ret and frame is not None:
-                    # Run ML on every frame (or every N frames — see Config)
-                    if frame_count % Config.INFERENCE_EVERY_N_FRAMES == 0:
-                        detection_result = detector.detect(frame)
-                        if detection_result.vehicle_detected:
-                            vehicle_detected = True
-                            cam_zone         = detection_result.highest_zone
-                            cam_conf         = detection_result.max_confidence
+            frames: dict[str, tuple[bool, object]] = {}
+            for role in cam_mgr.roles():
+                ok, frame = cam_mgr.get_frame(role)
+                frames[role] = (ok, frame)
 
-            # ── 4. Build SensorState & fuse ──────────────────────────
+                if ok and run_ml:
+                    results[role] = detector.detect(frame)
+                elif not ok:
+                    results[role] = None
+
+                # FPS counter
+                fps_counts[role] += 1
+                now = time.time()
+                if now - fps_timers[role] >= 1.0:
+                    fps_vals[role]   = fps_counts[role]
+                    fps_counts[role] = 0
+                    fps_timers[role] = now
+
+            # ── 4. Collision engine (uses right camera) ───────────────
+            right_result = results.get("right")
             state = SensorState(
                 lean_angle_deg       = lean_angle,
                 imu_ok               = imu_ok,
                 radar_triggered      = radar_triggered,
                 radar_distance_m     = radar_dist,
                 radar_ok             = radar is not None,
-                cam_ok               = cam_ok_flag,
-                vehicle_detected_cam = vehicle_detected,
-                cam_zone             = cam_zone,
-                cam_confidence       = cam_conf,
+                cam_ok               = frames["right"][0],
+                vehicle_detected_cam = bool(right_result and right_result.vehicle_detected),
+                cam_zone             = (right_result.highest_zone
+                                        if right_result and right_result.vehicle_detected
+                                        else ThreatZone.CLEAR),
+                cam_confidence       = (right_result.max_confidence
+                                        if right_result and right_result.vehicle_detected
+                                        else 0.0),
             )
-
             alert = engine.update(state)
+            last_alert = alert.level
 
-            # ── 5. Drive GPIO ─────────────────────────────────────────
-            if alert.led_on:
-                led.on()
-            else:
-                led.off()
+            # ── 5. GPIO outputs ───────────────────────────────────────
+            led.on() if alert.led_on else led.off()
+            motor.on() if alert.vibration_on else motor.off()
 
-            if alert.vibration_on:
-                motor.on()
-            else:
-                motor.off()
+            # ── 6. Annotate frames + push to MJPEG buffer ─────────────
+            annotated_jpegs: dict[str, bytes] = {}
+            for role in cam_mgr.roles():
+                ok, raw_frame = frames[role]
 
-            # ── 6. Log significant events ─────────────────────────────
-            if alert.level.value >= AlertLevel.WARNING.value:
-                logger.warning(
-                    f"[{alert.level.name}] {alert.reason} | "
-                    f"details={alert.details}"
+                if not ok or raw_frame is None:
+                    blank = np.zeros((HWConfig.CAMERA_HEIGHT, HWConfig.CAMERA_WIDTH, 3),
+                                     dtype=np.uint8)
+                    _draw_offline_overlay(blank, role)
+                    annotated_jpegs[role] = _encode_jpeg(blank)
+                    continue
+
+                frame = raw_frame.copy()
+                _draw_detections(frame, results[role])
+                _draw_hud(
+                    frame,
+                    role=role,
+                    alert=last_alert if role == "right" else AlertLevel.CLEAR,
+                    result=results[role],
+                    cam_index=cam_idx[role],
+                    fps=fps_vals[role],
                 )
+                annotated_jpegs[role] = _encode_jpeg(frame)
 
-            # ── 7. Push to dashboard ──────────────────────────────────
+            with _stream_lock:
+                for role, jpeg in annotated_jpegs.items():
+                    _stream_frames[role] = jpeg
+
+            # ── 7. SocketIO status push ───────────────────────────────
+            right_r = results.get("right")
             payload = {
                 "level":        alert.level.name,
                 "led":          alert.led_on,
                 "vibration":    alert.vibration_on,
                 "reason":       alert.reason,
-                "lean_angle":   lean_angle,
+                "lean_angle":   round(lean_angle, 1),
                 "radar":        radar_triggered,
                 "radar_dist_m": radar_dist,
-                "cam_ok":       cam_ok_flag,
-                "cam_zone":     cam_zone.name,
-                "cam_conf":     round(cam_conf, 3),
+                "cam_status":   cam_mgr.status(),
+                "cam_zone":     (right_r.highest_zone.name
+                                 if right_r and right_r.vehicle_detected else "CLEAR"),
+                "cam_conf":     round(right_r.max_confidence if right_r and right_r.vehicle_detected else 0.0, 3),
+                "fps": {role: round(fps_vals[role], 1) for role in cam_mgr.roles()},
                 "stats":        engine.stats,
-                "timestamp":    t_start,
-                # Pretty detection list for the overlay panel
-                "detections": [
-                    {
-                        "class":      d.class_name,
-                        "confidence": round(d.confidence, 3),
-                        "zone":       d.zone.name,
-                        "box":        d.box,
-                    }
-                    for d in (detection_result.detections if detection_result else [])
-                ],
+                "timestamp":    t0,
+                "detections": {
+                    role: [
+                        {
+                            "class":      d.class_name,
+                            "confidence": round(d.confidence, 3),
+                            "zone":       d.zone.name,
+                            "box":        d.box,
+                        }
+                        for d in (results[role].detections if results[role] else [])
+                    ]
+                    for role in cam_mgr.roles()
+                },
             }
 
-            with _dashboard_lock:
+            with _dash_lock:
                 _dashboard_state.update(payload)
 
             socketio.emit("status_update", payload)
 
-            # ── 8. Pace the loop ──────────────────────────────────────
-            elapsed = time.time() - t_start
-            sleep   = max(0.0, HWConfig.LOOP_INTERVAL - elapsed)
-            time.sleep(sleep)
+            # Log significant events
+            if alert.level.value >= AlertLevel.WARNING.value:
+                logger.warning(f"[{alert.level.name}] {alert.reason}")
+
+            # ── 8. Pace loop ──────────────────────────────────────────
+            elapsed = time.time() - t0
+            time.sleep(max(0.0, HWConfig.LOOP_INTERVAL - elapsed))
 
     except Exception as e:
         logger.exception(f"Sensor loop crashed: {e}")
     finally:
         led.off()
         motor.off()
-        camera.release()
+        cam_mgr.release_all()
         if radar:
             radar.close()
         logger.info("Sensor loop shut down cleanly")
@@ -374,12 +542,14 @@ def sensor_loop():
 # ==========================================================================
 
 if __name__ == "__main__":
-    logger.info("BlindGuard starting …")
+    logger.info("BlindGuard starting…")
 
-    # Start the sensor + fusion background thread
     bg = threading.Thread(target=sensor_loop, daemon=True, name="sensor-loop")
     bg.start()
 
-    # Run the Flask-SocketIO server
-    logger.info("Dashboard available at http://0.0.0.0:5000")
+    logger.info("Dashboard  → http://0.0.0.0:5000")
+    logger.info("Left  stream → http://0.0.0.0:5000/stream/left")
+    logger.info("Right stream → http://0.0.0.0:5000/stream/right")
+    logger.info("Rear  stream → http://0.0.0.0:5000/stream/rear")
+
     socketio.run(app, host="0.0.0.0", port=5000, debug=False, use_reloader=False)
