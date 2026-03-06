@@ -1,0 +1,38 @@
+# ============================================================
+# BlindGuard — Bike Blind-Spot Collision Detection System
+# requirements.txt
+#
+# Install on Raspberry Pi:
+#   pip install -r requirements.txt
+#
+# NOTE: tflite-runtime is the lightweight TFLite package for Pi.
+#       On a desktop/dev machine, replace it with:
+#           tensorflow
+#       and remove the tflite-runtime line.
+# ============================================================
+
+# ── Computer Vision ──────────────────────────────────────────
+opencv-python>=4.8.0
+
+# ── Numerical Computing ──────────────────────────────────────
+numpy>=1.24.0
+
+# ── TFLite Inference (Raspberry Pi) ──────────────────────────
+# Prebuilt wheel for Pi: https://github.com/google-coral/pycoral/releases
+tflite-runtime>=2.13.0
+
+# ── Serial Communication (mmWave Radar via UART) ─────────────
+pyserial>=3.5
+
+# ── Raspberry Pi GPIO ─────────────────────────────────────────
+gpiozero>=2.0
+
+# ── MPU6050 IMU (I²C lean-angle sensor) ──────────────────────
+mpu6050-raspberrypi>=1.2
+
+# ── Web Dashboard (Flask + SocketIO) ─────────────────────────
+flask>=3.0.0
+flask-socketio>=5.3.6
+
+# ── Async server for SocketIO (production mode via app.py) ───
+eventlet>=0.35.2
