@@ -47,7 +47,7 @@ from flask import Flask, render_template, Response, jsonify
 from flask_socketio import SocketIO
 
 # ── Our modules ───────────────────────────────────────────────────────────
-from camera import MultiCameraManager, DEFAULT_CAMERA_INDICES
+from camera import MultiCameraManager, CameraScanner, assign_roles
 from vehicle_detector import VehicleDetector, ThreatZone, DetectionResult
 from collision_engine import CollisionEngine, SensorState, AlertLevel, Config
 
@@ -72,11 +72,13 @@ class HWConfig:
     RADAR_BAUD      = 115200
     RADAR_TIMEOUT   = 0.1
 
-    # Camera device indices per logical role
-    CAMERA_INDICES  = {"left": 0, "right": 1, "rear": 2}
-    CAMERA_WIDTH    = 640
-    CAMERA_HEIGHT   = 480
-    CAMERA_FPS      = 30
+    # Role assignment order — cameras are assigned left→right→rear
+    # in the order they are discovered (ascending /dev/video* index).
+    # Change this list to reorder which physical camera maps to which role.
+    CAMERA_ROLE_ORDER = ["left", "right", "rear"]
+    CAMERA_WIDTH      = 640
+    CAMERA_HEIGHT     = 480
+    CAMERA_FPS        = 30
 
     # TFLite model
     MODEL_PATH      = "yolov8n.tflite"
@@ -374,26 +376,39 @@ def sensor_loop():
     radar      = _init_radar()
 
     cam_mgr  = MultiCameraManager(
-        indices=HWConfig.CAMERA_INDICES,
+        # No `indices` arg → runs CameraScanner automatically at startup
+        role_order=HWConfig.CAMERA_ROLE_ORDER,
         width=HWConfig.CAMERA_WIDTH,
         height=HWConfig.CAMERA_HEIGHT,
         fps=HWConfig.CAMERA_FPS,
     )
+
+    # Log the discovered mapping so it appears in the Pi terminal
+    discovered = cam_mgr.cam_map()
+    if discovered:
+        logger.info("Camera role assignment:")
+        for role, idx in discovered.items():
+            logger.info(f"  {role:>5s} → /dev/video{idx} (cv2 index {idx})")
+    else:
+        logger.warning("No cameras discovered — all streams will show offline placeholder")
+
     detector = VehicleDetector(model_path=HWConfig.MODEL_PATH)
     engine   = CollisionEngine(cfg=Config())
 
     frame_count = 0
 
-    # Per-camera state
-    results:    dict[str, DetectionResult | None] = {r: None for r in cam_mgr.roles()}
-    fps_counts: dict[str, int]   = {r: 0 for r in cam_mgr.roles()}
-    fps_timers: dict[str, float] = {r: time.time() for r in cam_mgr.roles()}
-    fps_vals:   dict[str, float] = {r: 0.0 for r in cam_mgr.roles()}
+    # Use discovered roles; fall back to all three role names so the MJPEG
+    # generators still serve offline placeholders even with 0 cameras.
+    _roles = cam_mgr.roles() or HWConfig.CAMERA_ROLE_ORDER
 
-    # Camera index map for HUD
-    cam_idx = {"left": HWConfig.CAMERA_INDICES.get("left", 0),
-               "right": HWConfig.CAMERA_INDICES.get("right", 1),
-               "rear": HWConfig.CAMERA_INDICES.get("rear", 2)}
+    # Per-camera state
+    results:    dict[str, DetectionResult | None] = {r: None  for r in _roles}
+    fps_counts: dict[str, int]                    = {r: 0     for r in _roles}
+    fps_timers: dict[str, float]                  = {r: time.time() for r in _roles}
+    fps_vals:   dict[str, float]                  = {r: 0.0   for r in _roles}
+
+    # Camera index map for HUD — safe fallback to 0 if role not assigned
+    cam_idx = discovered   # role → int index
 
     # Last published alert (to annotate all frames with coherent status)
     last_alert = AlertLevel.CLEAR
@@ -438,7 +453,7 @@ def sensor_loop():
                 radar_triggered      = radar_triggered,
                 radar_distance_m     = radar_dist,
                 radar_ok             = radar is not None,
-                cam_ok               = frames["right"][0],
+                cam_ok               = frames.get("right", (False, None))[0],
                 vehicle_detected_cam = bool(right_result and right_result.vehicle_detected),
                 cam_zone             = (right_result.highest_zone
                                         if right_result and right_result.vehicle_detected
@@ -456,8 +471,8 @@ def sensor_loop():
 
             # ── 6. Annotate frames + push to MJPEG buffer ─────────────
             annotated_jpegs: dict[str, bytes] = {}
-            for role in cam_mgr.roles():
-                ok, raw_frame = frames[role]
+            for role in _roles:
+                ok, raw_frame = frames.get(role, (False, None))
 
                 if not ok or raw_frame is None:
                     blank = np.zeros((HWConfig.CAMERA_HEIGHT, HWConfig.CAMERA_WIDTH, 3),
@@ -473,7 +488,7 @@ def sensor_loop():
                     role=role,
                     alert=last_alert if role == "right" else AlertLevel.CLEAR,
                     result=results[role],
-                    cam_index=cam_idx[role],
+                    cam_index=cam_idx.get(role, 0),
                     fps=fps_vals[role],
                 )
                 annotated_jpegs[role] = _encode_jpeg(frame)
@@ -493,6 +508,7 @@ def sensor_loop():
                 "radar":        radar_triggered,
                 "radar_dist_m": radar_dist,
                 "cam_status":   cam_mgr.status(),
+                "cam_map":  {role: f"/dev/video{idx}" for role, idx in discovered.items()},
                 "cam_zone":     (right_r.highest_zone.name
                                  if right_r and right_r.vehicle_detected else "CLEAR"),
                 "cam_conf":     round(right_r.max_confidence if right_r and right_r.vehicle_detected else 0.0, 3),
