@@ -1,25 +1,36 @@
+"""
+app.py
+======
+Production entry-point using eventlet for async SocketIO support.
+Run this file on the Raspberry Pi instead of main.py directly.
+
+Usage
+-----
+  python app.py
+"""
+
 import eventlet
 eventlet.monkey_patch()
 
-from main import app, socketio, sensor_loop
-import threading
 import os
+import logging
 
-# Ensure the Flask environment is aware of where we are
-os.environ['FLASK_APP'] = 'app.py'
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
 
-def run_background_logic():
-    """Start the background sensor and processing loop."""
-    print("Starting background sensor loop...")
-    sensor_thread = threading.Thread(target=sensor_loop, daemon=True)
-    sensor_thread.start()
+os.environ["FLASK_APP"] = "app.py"
 
-if __name__ == '__main__':
-    # Start the hardware/sensor background thread
-    run_background_logic()
-    
-    # Run the Flask-SocketIO server
-    # Port 5000 as requested
-    print("Starting BlindGuard Dashboard at http://0.0.0.0:5000")
-    socketio.run(app, host='0.0.0.0', port=5000, debug=False, use_reloader=False)
+# Import after monkey-patch
+from main import app, socketio, sensor_loop   # noqa: E402
+import threading
 
+if __name__ == "__main__":
+    # Launch background sensor + fusion loop
+    bg = threading.Thread(target=sensor_loop, daemon=True, name="sensor-loop")
+    bg.start()
+
+    # Serve the Flask-SocketIO dashboard
+    print("BlindGuard Dashboard running at http://0.0.0.0:5000")
+    socketio.run(app, host="0.0.0.0", port=5000, debug=False, use_reloader=False)
